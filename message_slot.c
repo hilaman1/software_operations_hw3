@@ -72,6 +72,7 @@ static ssize_t device_write( struct file*       file,
                              size_t             length,
                              loff_t*            offset)
 {
+    message_slot *data = (message_slot*)(file->private_data);
     ssize_t i;
     printk("Invoking device_write(%p,%ld)\n", file, length);
     for(i = 0; i < length && i < BUF_LEN; ++i ) {
