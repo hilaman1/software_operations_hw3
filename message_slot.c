@@ -15,16 +15,17 @@
 
 MODULE_LICENSE("GPL");
 
-typedef struct{
+typedef struct channel{
     unsigned int channel_id;
     char current_message[BUF_LEN];
     int message_size;
-    channel *next;
-    channel *prev;
+    struct channel *next;
+    struct channel *prev;
 } channel;
 
 typedef struct {
     channel *head;
+    channel *tail;
 } channel_list;
 
 // a data structure to describe individual message slots
@@ -122,8 +123,7 @@ static long device_ioctl( struct   file* file,
     // Switch according to the ioctl called
     if( MSG_SLOT_CHANNEL == ioctl_command_id ) {
         if (ioctl_param == 0){
-            errno = EINVAL;
-            return FAILURE;
+            return -EINVAL;
         }
         // we need to envoke the channel if it hasn't been envoked
         // if we add a new one, we need to add it sorted by the id_num
@@ -134,10 +134,9 @@ static long device_ioctl( struct   file* file,
         // new channel at the start
             slot_lst_head = kmalloc(sizeof(channel), GFP_KERNEL);
             if (slot_lst_head == NULL){
-                errno = ENOMEM;
                 // the error of malloc and calloc on failure as mentioned here:
                 // https://man7.org/linux/man-pages/man3/malloc.3.html
-                return FAILURE;
+                return -ENOMEM;
             }
             // update the chosen slot that this is the invoked channel
             slot_lst_head->channel_id = ioctl_param;
@@ -147,18 +146,19 @@ static long device_ioctl( struct   file* file,
             // slot_lst_head->current_message is created while creating the object
             chosen_slot->slot_invoked_channel = slot_lst_head;
             message_slots[chosen_slot->minor_number].head = slot_lst_head;
+            message_slots[chosen_slot->minor_number].tail = slot_lst_head;
             return SUCCESS;
         }else{
             // list is not empty, we need to find if the channel exists
             // if not, we need to add it to the list in the sorted place
-            channel *temp_head;
-            temp_head = slot_lst_head;
-            if (temp_head->channel_id < ioctl_param){
+            channel *temp_head = slot_lst_head;
+            channel *temp_tail = slot_lst_head;
+
+            if (ioctl_param < temp_head->channel_id){
                 channel *new_channel;
                 new_channel = kmalloc(sizeof(channel), GFP_KERNEL);
                 if (new_channel == NULL){
-                    errno = ENOMEM;
-                    return FAILURE;
+                    return -ENOMEM;
                 }
                 new_channel->channel_id = ioctl_param;
                 new_channel->message_size = 0;
@@ -169,6 +169,22 @@ static long device_ioctl( struct   file* file,
                 chosen_slot->slot_invoked_channel = slot_lst_head;
                 chosen_slot->slot_invoked_channel_id = ioctl_param;
                 message_slots[chosen_slot->minor_number].head = slot_lst_head;
+                return SUCCESS;
+            }
+            if (ioctl_param > temp_tail->channel_id){
+                channel *new_channel;
+                new_channel = kmalloc(sizeof(channel), GFP_KERNEL);
+                if (new_channel == NULL){
+                    return -ENOMEM;
+                }
+                new_channel->channel_id = ioctl_param;
+                new_channel->message_size = 0;
+                temp_head->prev = new_channel;
+                new_channel->next = NULL;
+                new_channel->prev = temp_tail;
+                slot_lst_head = new_channel;
+                chosen_slot->slot_invoked_channel = slot_lst_head;
+                chosen_slot->slot_invoked_channel_id = ioctl_param;
                 return SUCCESS;
             }
             while (temp_head != NULL){
@@ -184,8 +200,7 @@ static long device_ioctl( struct   file* file,
                     channel *new_channel;
                     new_channel = kmalloc(sizeof(channel), GFP_KERNEL);
                     if (new_channel == NULL){
-                        errno = ENOMEM;
-                        return FAILURE;
+                        return -ENOMEM;
                     }
                     new_channel->channel_id = ioctl_param;
                     new_channel->message_size = 0;
@@ -200,24 +215,12 @@ static long device_ioctl( struct   file* file,
             channel *new_channel;
             new_channel = kmalloc(sizeof(channel), GFP_KERNEL);
             if (new_channel == NULL){
-                errno = ENOMEM;
-                return FAILURE;
+                return -ENOMEM;
             }
-            // if we got here without return, we need to add it at the end
-            new_channel->channel_id = ioctl_param;
-            new_channel->message_size = 0;
-            new_channel->prev = temp_head->prev;
-            new_channel->next = NULL;
-            temp_head->prev->next = new_channel;
-            temp_head->prev = new_channel;
-            chosen_slot->slot_invoked_channel = new_channel;
-            return SUCCESS;
-
         }
         return SUCCESS;
     } else{
-        errno = EINVAL;
-        return FAILURE;
+        return -EINVAL;
     }
 
 }
