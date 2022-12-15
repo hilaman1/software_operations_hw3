@@ -11,9 +11,40 @@
 #include <linux/fs.h>       /* for register_chrdev */
 #include <linux/uaccess.h>  /* for get_user and put_user */
 #include <linux/string.h>   /* for memset. NOTE - not string.h!*/
+#include <linux/slab.h> /* for GFP_KERNEL flag */
 
 MODULE_LICENSE("GPL");
 
+typedef struct{
+    unsigned int channel_id;
+    char current_message[BUF_LEN];
+    int message_size;
+    channel *next;
+    channel *prev;
+} channel;
+
+typedef struct {
+    channel *head;
+} channel_list;
+
+// a data structure to describe individual message slots
+// (device files with different minor numbers)
+typedef struct{
+    int minor_number;
+    unsigned int slot_invoked_channel_id;
+    channel *slot_invoked_channel;
+} message_slot;
+
+
+// there are 256 possible minor numbers
+// each message_slot has a list of channels
+// thus we will make a "global" array which contains
+// a list of channels for each minor num
+// ** this list will be sorted on-line by id-num
+
+// we put it here and not in __init so it won't
+// be deleted after module_init()
+channel_list message_slots[256];
 
 struct chardev_info {
     spinlock_t lock;
@@ -27,7 +58,8 @@ static struct chardev_info device_info;
 // The message the device will give when asked
 static char the_message[BUF_LEN];
 
-// major num is always defined as 235
+
+
 
 //================== DEVICE FUNCTIONS ===========================
 static int device_open( struct inode* inode,
@@ -91,13 +123,101 @@ static long device_ioctl( struct   file* file,
     if( MSG_SLOT_CHANNEL == ioctl_command_id ) {
         if (ioctl_param == 0){
             errno = EINVAL;
-            return -1;
+            return FAILURE;
+        }
+        // we need to envoke the channel if it hasn't been envoked
+        // if we add a new one, we need to add it sorted by the id_num
+        message_slot *chosen_slot = (message_slot) file->private_data;
+        channel *slot_lst_head = message_slots[chosen_slot->minor_number].head;
+        if (slot_lst_head == NULL){
+        // list is empty, we don't need to search and we can add a
+        // new channel at the start
+            slot_lst_head = kmalloc(sizeof(channel), GFP_KERNEL);
+            if (slot_lst_head == NULL){
+                errno = ENOMEM;
+                // the error of malloc and calloc on failure as mentioned here:
+                // https://man7.org/linux/man-pages/man3/malloc.3.html
+                return FAILURE;
+            }
+            // update the chosen slot that this is the invoked channel
+            slot_lst_head->channel_id = ioctl_param;
+            slot_lst_head->next = NULL;
+            slot_lst_head->prev = NULL;
+            slot_lst_head->message_size = 0;
+            // slot_lst_head->current_message is created while creating the object
+            chosen_slot->slot_invoked_channel = slot_lst_head;
+            message_slots[chosen_slot->minor_number].head = slot_lst_head;
+            return SUCCESS;
+        }else{
+            // list is not empty, we need to find if the channel exists
+            // if not, we need to add it to the list in the sorted place
+            channel *temp_head;
+            temp_head = slot_lst_head;
+            if (temp_head->channel_id < ioctl_param){
+                channel *new_channel;
+                new_channel = kmalloc(sizeof(channel), GFP_KERNEL);
+                if (new_channel == NULL){
+                    errno = ENOMEM;
+                    return FAILURE;
+                }
+                new_channel->channel_id = ioctl_param;
+                new_channel->message_size = 0;
+                temp_head->prev = new_channel;
+                new_channel->next = temp_head;
+                new_channel->prev = NULL;
+                slot_lst_head = new_channel;
+                chosen_slot->slot_invoked_channel = slot_lst_head;
+                chosen_slot->slot_invoked_channel_id = ioctl_param;
+                message_slots[chosen_slot->minor_number].head = slot_lst_head;
+                return SUCCESS;
+            }
+            while (temp_head != NULL){
+                if (ioctl_param == (temp_head->channel_id)){
+                    // channel exists, update the slot this is
+                    // the invoked channel
+                    chosen_slot->slot_invoked_channel = temp_head;
+                    chosen_slot->slot_invoked_channel_id = ioctl_param;
+                    return SUCCESS;
+                }
+                if ((temp_head->prev->channel_id) < ioctl_param < (temp_head->channel_id)){
+                    channel *temp_prev = temp_head->prev;
+                    channel *new_channel;
+                    new_channel = kmalloc(sizeof(channel), GFP_KERNEL);
+                    if (new_channel == NULL){
+                        errno = ENOMEM;
+                        return FAILURE;
+                    }
+                    new_channel->channel_id = ioctl_param;
+                    new_channel->message_size = 0;
+                    new_channel->prev = temp_prev;
+                    new_channel->next = temp_head;
+                    temp_head->prev->next = new_channel;
+                    temp_head->prev = new_channel;
+                    chosen_slot->slot_invoked_channel = new_channel;
+                    return SUCCESS;
+                }
+            }
+            channel *new_channel;
+            new_channel = kmalloc(sizeof(channel), GFP_KERNEL);
+            if (new_channel == NULL){
+                errno = ENOMEM;
+                return FAILURE;
+            }
+            // if we got here without return, we need to add it at the end
+            new_channel->channel_id = ioctl_param;
+            new_channel->message_size = 0;
+            new_channel->prev = temp_head->prev;
+            new_channel->next = NULL;
+            temp_head->prev->next = new_channel;
+            temp_head->prev = new_channel;
+            chosen_slot->slot_invoked_channel = new_channel;
+            return SUCCESS;
+
         }
         return SUCCESS;
-
     } else{
         errno = EINVAL;
-        return -1;
+        return FAILURE;
     }
 
 }
@@ -113,10 +233,24 @@ struct file_operations Fops = {
 
 static int __init message_slot_init(void)
 {
+    // taken from CHARDEV2\chardev.c file from recitation 6
+    int rc = -1;
     // init dev struct
     memset( &device_info, 0, sizeof(struct chardev_info) );
     spin_lock_init( &device_info.lock );
-    return 0;
+
+    // Register driver capabilities. Obtain major num
+    rc = register_chrdev( MAJOR_NUM, DEVICE_RANGE_NAME, &Fops );
+    // Negative values signify an error
+    if( rc < 0 ) {
+        printk( KERN_ERR "%s registraion failed for  %d\n",
+                DEVICE_FILE_NAME, MAJOR_NUM );
+        return rc;
+    }
+    for (int j = 0; j < 256; ++j) {
+        message_slots[j].head = NULL;
+    }
+    return SUCCESS;
 }
 
 static void __exit message_slot_cleanup(void)
