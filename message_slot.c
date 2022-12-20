@@ -45,7 +45,7 @@ typedef struct{
 
 // we put it here and not in __init so it won't
 // be deleted after module_init()
-channel_list message_slots[256];
+channel_list message_slots[257];
 
 struct chardev_info {
     spinlock_t lock;
@@ -57,7 +57,6 @@ static int dev_open_flag = 0;
 static struct chardev_info device_info;
 
 // The message the device will give when asked
-static char the_message[BUF_LEN];
 
 
 
@@ -66,6 +65,16 @@ static char the_message[BUF_LEN];
 static int device_open( struct inode* inode,
                         struct file*  file )
 {
+    int minor = iminor(inode);
+    message_slot new_slot = kmalloc(sizeof(message_slot), GFP_KERNEL);
+    if (new_slot == NULL){
+        printk("device_open kmalloc failed\n", file);
+        return -ENOMEM;
+    }
+    new_slot.minor_number = minor;
+    new_slot.slot_invoked_channel_id = 0;
+    file->private_data = (void*) new_slot;
+
     unsigned long flags; // for spinlock
     printk("Invoking device_open(%p)\n", file);
 
@@ -80,6 +89,22 @@ static int device_open( struct inode* inode,
     spin_unlock_irqrestore(&device_info.lock, flags);
     return SUCCESS;
 }
+
+//---------------------------------------------------------------
+static int device_release( struct inode* inode,
+                           struct file*  file)
+{
+    unsigned long flags; // for spinlock
+    printk("Invoking device_release(%p,%p)\n", inode, file);
+
+    // ready for our next caller
+    spin_lock_irqsave(&device_info.lock, flags);
+    --dev_open_flag;
+    spin_unlock_irqrestore(&device_info.lock, flags);
+    kfree(file->private_data);
+    return SUCCESS;
+}
+
 //---------------------------------------------------------------
 // a process which has already opened
 // the device file attempts to read from it
@@ -88,13 +113,28 @@ static ssize_t device_read( struct file* file,
                             size_t       length,
                             loff_t*      offset )
 {
-    // read doesnt really do anything (for now)
-    printk( "Invocing device_read(%p,%ld) - "
-            "operation not supported yet\n"
-            "(last written - %s)\n",
-            file, length, the_message );
-    //invalid argument error
-    return errno;
+    printk( "Invocing device_read(%p,%ld)\n",file, length);
+    message_slot *current_slot = (void*)(file->private_data);
+    int last_message_size = current_slot->slot_invoked_channel->message_size;
+    if (current_slot->slot_invoked_channel_id != 0){
+        if (last_message_size != 0){
+            if (buffer >= last_message_size){
+                for(int i = 0; i < last_message_size; ++i){
+                    // get_user returns -EFAULT on error:
+                    // https://www.cs.bham.ac.uk/~exr/lectures/opsys/12_13/docs/kernelAPI/r3776.html
+                    if(put_user(current_slot->slot_invoked_channel->current_message[i],buffer + i) != 0){
+                        return -EFAULT;
+                    }
+                }
+            }else{
+                return -ENOSPC;
+            }
+        }else{
+            return -EWOULDBLOCK;
+        }
+    }else{
+        return -EINVAL;
+    }
 }
 
 //---------------------------------------------------------------
@@ -105,21 +145,43 @@ static ssize_t device_write( struct file*       file,
                              size_t             length,
                              loff_t*            offset)
 {
-    message_slot *data = (message_slot*)(file->private_data);
-    ssize_t i;
     printk("Invoking device_write(%p,%ld)\n", file, length);
-    for(i = 0; i < length && i < BUF_LEN; ++i ) {
-        get_user(the_message[i], &buffer[i]);
+
+    if (length == 0 || length > 128){
+        message_slot *current_slot = (void*)(file->private_data);
+        if (current_slot->slot_invoked_channel_id != 0){
+            char the_message[128];
+            ssize_t message_length;
+            for(int i = 0; i < length && i < 128; ++i ) {
+                if (get_user(the_message[i], &buffer[i]) != 0){
+                    // get_user returns -EFAULT on error:
+                    // https://www.cs.bham.ac.uk/~exr/lectures/opsys/12_13/docs/kernelAPI/r3776.html
+                    return -EFAULT;
+                }
+            }
+            for(int i = 0; i < length && i < 128; ++i ) {
+                current_slot->slot_invoked_channel->current_message[i] = the_message[i];
+            }
+            current_slot->slot_invoked_channel->message_size = length;
+            // return the number of input characters used
+            return message_length;
+        }else{
+            return -EINVAL;
+        }
+    }else{
+        return -EMSGSIZE;
     }
 
-    // return the number of input characters used
-    return i;
+
+
 }
 //----------------------------------------------------------------
 static long device_ioctl( struct   file* file,
                           unsigned int   ioctl_command_id,
                           unsigned long  ioctl_param )
 {
+    printk( "Invoking ioctl: setting channel "
+            "to %ld\n", ioctl_param );
     // Switch according to the ioctl called
     if( MSG_SLOT_CHANNEL == ioctl_command_id ) {
         if (ioctl_param == 0){
@@ -127,13 +189,14 @@ static long device_ioctl( struct   file* file,
         }
         // we need to envoke the channel if it hasn't been envoked
         // if we add a new one, we need to add it sorted by the id_num
-        message_slot *chosen_slot = (message_slot) file->private_data;
+        message_slot *chosen_slot = (void*) file->private_data;
         channel *slot_lst_head = message_slots[chosen_slot->minor_number].head;
         if (slot_lst_head == NULL){
         // list is empty, we don't need to search and we can add a
         // new channel at the start
             slot_lst_head = kmalloc(sizeof(channel), GFP_KERNEL);
             if (slot_lst_head == NULL){
+                printk("device_ioctl kmalloc failed\n", file);
                 // the error of malloc and calloc on failure as mentioned here:
                 // https://man7.org/linux/man-pages/man3/malloc.3.html
                 return -ENOMEM;
@@ -158,6 +221,7 @@ static long device_ioctl( struct   file* file,
                 channel *new_channel;
                 new_channel = kmalloc(sizeof(channel), GFP_KERNEL);
                 if (new_channel == NULL){
+                    printk("device_ioctl kmalloc failed\n", file);
                     return -ENOMEM;
                 }
                 new_channel->channel_id = ioctl_param;
@@ -175,6 +239,7 @@ static long device_ioctl( struct   file* file,
                 channel *new_channel;
                 new_channel = kmalloc(sizeof(channel), GFP_KERNEL);
                 if (new_channel == NULL){
+                    printk("device_ioctl kmalloc failed\n", file);
                     return -ENOMEM;
                 }
                 new_channel->channel_id = ioctl_param;
@@ -200,6 +265,7 @@ static long device_ioctl( struct   file* file,
                     channel *new_channel;
                     new_channel = kmalloc(sizeof(channel), GFP_KERNEL);
                     if (new_channel == NULL){
+                        printk("device_ioctl kmalloc failed\n", file);
                         return -ENOMEM;
                     }
                     new_channel->channel_id = ioctl_param;
@@ -212,13 +278,7 @@ static long device_ioctl( struct   file* file,
                     return SUCCESS;
                 }
             }
-            channel *new_channel;
-            new_channel = kmalloc(sizeof(channel), GFP_KERNEL);
-            if (new_channel == NULL){
-                return -ENOMEM;
-            }
         }
-        return SUCCESS;
     } else{
         return -EINVAL;
     }
@@ -250,7 +310,9 @@ static int __init message_slot_init(void)
                 DEVICE_FILE_NAME, MAJOR_NUM );
         return rc;
     }
-    for (int j = 0; j < 256; ++j) {
+//  initiate an empty list for each possible message_slot
+//  with minor number 0<=i<=256
+    for (int j = 0; j < 257; ++j) {
         message_slots[j].head = NULL;
     }
     return SUCCESS;
@@ -258,15 +320,24 @@ static int __init message_slot_init(void)
 
 static void __exit message_slot_cleanup(void)
 {
+    // free all the allocated memory (list for each message_slot device)
+    channel *temp_head;
+    channl *head;
+    for (int j = 0; j < 257; ++j) {
+        head = message_slots[i].head;
+        while(head != NULL){
+            temp_head = head;
+            head = head->next;
+            kfree(temp_head);
+        }
+    }
     // Unregister the device
     // Should always succeed
-    unregister_chrdev(major, DEVICE_RANGE_NAME);
+    unregister_chrdev(MAJOR_NUM, DEVICE_RANGE_NAME);
 }
 
 //---------------------------------------------------------------
 
-if (module_init(simple_init) != 0) {
-    printk(KERN_ERR "message_slot module initialization failed");
-}
-
-module_exit(simple_cleanup);
+module_init(message_slot_init);
+module_exit(message_slot_cleanup);
+//========================= END OF FILE =========================
