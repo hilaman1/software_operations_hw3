@@ -1,21 +1,23 @@
 #include "message_slot.h"
 #include <stdio.h>
-#include <math.h>
 #include <stdlib.h>
-#include <float.h>
-#include <stdbool.h>
-#include <ctype.h>
+
 #include <string.h>
+
+#include <fcntl.h>      /* open */
+#include <unistd.h>     /* exit */
+#include <sys/ioctl.h>  /* ioctl */
+
 
 
 int main(int argc, char** argv) {
     char* message_slot_file_path;
     unsigned int target_message_channel_id;
     char* message_to_pass;
-    FILE *ifp; /* input_file pointer */
+    int ifp; /* input_file pointer */
     int returned_val;
     /* checking if the input is valid */
-    if (argc == 4){ /* we include the program's name and there are 4 arguments if max_iter is provided */
+    if (argc == 4){ /* we include the program's name */
         message_slot_file_path = argv[1];
         target_message_channel_id = atoi(argv[2]);
         message_to_pass = argv[3];

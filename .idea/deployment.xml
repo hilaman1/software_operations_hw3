@@ -12,7 +12,7 @@
       <paths name="virtual machine (5e8781f6-424c-4ad6-abc4-ee4ef26ed899)">
         <serverdata>
           <mappings>
-            <mapping deploy="/OP/HW3" local="$PROJECT_DIR$" />
+            <mapping deploy="/OP/HW35" local="$PROJECT_DIR$" />
           </mappings>
           <excludedPaths>
             <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-debug-virtual-machine" />

@@ -23,14 +23,14 @@ typedef struct channel{
     struct channel *prev;
 } channel;
 
-typedef struct {
+typedef struct channel_list{
     channel *head;
     channel *tail;
 } channel_list;
 
 // a data structure to describe individual message slots
 // (device files with different minor numbers)
-typedef struct{
+typedef struct message_slot{
     int minor_number;
     unsigned int slot_invoked_channel_id;
     channel *slot_invoked_channel;
@@ -65,17 +65,17 @@ static int device_open( struct inode* inode,
                         struct file*  file )
 {
     int minor = iminor(inode);
-    message_slot new_slot = kmalloc(sizeof(message_slot), GFP_KERNEL);
+    unsigned long flags; // for spinlock
+    message_slot *new_slot = kmalloc(sizeof(message_slot), GFP_KERNEL);
+
+    printk("Invoking device_open(%p)\n", file);
     if (new_slot == NULL){
-        printk("device_open kmalloc failed\n", file);
+        printk("device_open kmalloc failed(%p)\n", file);
         return -ENOMEM;
     }
-    new_slot.minor_number = minor;
-    new_slot.slot_invoked_channel_id = 0;
+    new_slot->minor_number = minor;
+    new_slot->slot_invoked_channel_id = 0;
     file->private_data = (void*) new_slot;
-
-    unsigned long flags; // for spinlock
-    printk("Invoking device_open(%p)\n", file);
 
     // We don't want to talk to two processes at the same time
     spin_lock_irqsave(&device_info.lock, flags);
@@ -83,7 +83,6 @@ static int device_open( struct inode* inode,
         spin_unlock_irqrestore(&device_info.lock, flags);
         return -EBUSY;
     }
-
     ++dev_open_flag;
     spin_unlock_irqrestore(&device_info.lock, flags);
     return SUCCESS;
@@ -112,19 +111,25 @@ static ssize_t device_read( struct file* file,
                             size_t       length,
                             loff_t*      offset )
 {
-    printk( "Invocing device_read(%p,%ld)\n",file, length);
+
+    int i;
     message_slot *current_slot = (void*)(file->private_data);
     int last_message_size = current_slot->slot_invoked_channel->message_size;
-    if (current_slot->slot_invoked_channel_id != 0){
+    printk( "Invocing device_read(%p,%ld)\n",file, length);
+
+    if (current_slot->slot_invoked_channel_id != 0 && buffer != NULL){
         if (last_message_size != 0){
-            if (buffer >= last_message_size){
-                for(int i = 0; i < last_message_size; ++i){
+            if (length >= last_message_size){
+                for(i = 0; i < last_message_size; ++i){
                     // get_user returns -EFAULT on error:
                     // https://www.cs.bham.ac.uk/~exr/lectures/opsys/12_13/docs/kernelAPI/r3776.html
                     if(put_user(current_slot->slot_invoked_channel->current_message[i],buffer + i) != 0){
                         return -EFAULT;
                     }
+                    // we use put_user to check if this address is legal
                 }
+                // Returns the number of bytes read
+                return i;
             }else{
                 return -ENOSPC;
             }
@@ -139,27 +144,26 @@ static ssize_t device_read( struct file* file,
 //---------------------------------------------------------------
 // a processs which has already opened
 // the device file attempts to write to it
-static ssize_t device_write( struct file*       file,
-                             const char __user* buffer
-                             size_t             length,
-                             loff_t*            offset)
+static ssize_t device_write(struct file* file, const char __user* buffer, size_t length, loff_t* offset)
 {
+    message_slot *current_slot = (void*)(file->private_data);
+    ssize_t message_length;
+    int i,j;
     printk("Invoking device_write(%p,%ld)\n", file, length);
 
-    if (length == 0 || length > 128){
-        message_slot *current_slot = (void*)(file->private_data);
+    if (length != 0 || length <= BUF_LEN){
         if (current_slot->slot_invoked_channel_id != 0){
             char the_message[128];
-            ssize_t message_length;
-            for(int i = 0; i < length && i < 128; ++i ) {
+            for(i = 0; i < length && i < BUF_LEN; ++i ) {
+                // we use get_user to check if this address is legal
                 if (get_user(the_message[i], &buffer[i]) != 0){
                     // get_user returns -EFAULT on error:
                     // https://www.cs.bham.ac.uk/~exr/lectures/opsys/12_13/docs/kernelAPI/r3776.html
                     return -EFAULT;
                 }
             }
-            for(int i = 0; i < length && i < 128; ++i ) {
-                current_slot->slot_invoked_channel->current_message[i] = the_message[i];
+            for(j = 0; j < length && j < BUF_LEN; ++j ) {
+                current_slot->slot_invoked_channel->current_message[j] = the_message[j];
             }
             current_slot->slot_invoked_channel->message_size = length;
             // return the number of input characters used
@@ -175,28 +179,33 @@ static ssize_t device_write( struct file*       file,
 
 }
 //----------------------------------------------------------------
-static long device_ioctl( struct   file* file,
-                          unsigned int   ioctl_command_id,
-                          unsigned long  ioctl_param )
-{
-    printk( "Invoking ioctl: setting channel "
-            "to %ld\n", ioctl_param );
+static long device_ioctl(struct file* file, unsigned int ioctl_command_id, unsigned long ioctl_param ) {
+    // we need to envoke the channel if it hasn't been envoked
+    // if we add a new one, we need to add it sorted by the id_num
+    message_slot *chosen_slot = (void *) file->private_data;
+    channel *slot_lst_head = message_slots[chosen_slot->minor_number].head;
+    channel *slot_lst_tail = message_slots[chosen_slot->minor_number].tail;
+    channel *temp_head = slot_lst_head;
+    channel *temp_tail = slot_lst_tail;
+    channel *new_channel;
+    printk("Invoking ioctl: setting channel to %ld\n", ioctl_param);
+    new_channel = kmalloc(sizeof(channel), GFP_KERNEL);
+    if (new_channel == NULL) {
+        printk("device_ioctl kmalloc failed(%p)\n", file);
+        return -ENOMEM;
+    }
+
     // Switch according to the ioctl called
-    if( MSG_SLOT_CHANNEL == ioctl_command_id ) {
-        if (ioctl_param == 0){
+    if (ioctl_command_id == MSG_SLOT_CHANNEL) {
+        if (ioctl_param == 0) {
             return -EINVAL;
         }
-        // we need to envoke the channel if it hasn't been envoked
-        // if we add a new one, we need to add it sorted by the id_num
-        message_slot *chosen_slot = (void*) file->private_data;
-        channel *slot_lst_head = message_slots[chosen_slot->minor_number].head;
-        channel *slot_lst_tail = message_slots[chosen_slot->minor_number].tail;
-        if (slot_lst_head == NULL){
-        // list is empty, we don't need to search and we can add a
-        // new channel at the start
+        if (slot_lst_head == NULL) {
+            // list is empty, we don't need to search and we can add a
+            // new channel at the start
             slot_lst_head = kmalloc(sizeof(channel), GFP_KERNEL);
-            if (slot_lst_head == NULL){
-                printk("device_ioctl kmalloc failed\n", file);
+            if (slot_lst_head == NULL) {
+                printk("device_ioctl kmalloc failed(%p)\n", file);
                 // the error of malloc and calloc on failure as mentioned here:
                 // https://man7.org/linux/man-pages/man3/malloc.3.html
                 return -ENOMEM;
@@ -211,19 +220,10 @@ static long device_ioctl( struct   file* file,
             message_slots[chosen_slot->minor_number].head = slot_lst_head;
             message_slots[chosen_slot->minor_number].tail = slot_lst_head;
             return SUCCESS;
-        }else{
+        } else {
             // list is not empty, we need to find if the channel exists
             // if not, we need to add it to the list in the sorted place
-            channel *temp_head = slot_lst_head;
-            channel *temp_tail = slot_lst_tail;
-
-            if (ioctl_param < temp_head->channel_id){
-                channel *new_channel;
-                new_channel = kmalloc(sizeof(channel), GFP_KERNEL);
-                if (new_channel == NULL){
-                    printk("device_ioctl kmalloc failed\n", file);
-                    return -ENOMEM;
-                }
+            if (ioctl_param < temp_head->channel_id) {
                 new_channel->channel_id = ioctl_param;
                 new_channel->message_size = 0;
                 temp_head->prev = new_channel;
@@ -235,13 +235,7 @@ static long device_ioctl( struct   file* file,
                 message_slots[chosen_slot->minor_number].head = slot_lst_head;
                 return SUCCESS;
             }
-            if (ioctl_param > temp_tail->channel_id){
-                channel *new_channel;
-                new_channel = kmalloc(sizeof(channel), GFP_KERNEL);
-                if (new_channel == NULL){
-                    printk("device_ioctl kmalloc failed\n", file);
-                    return -ENOMEM;
-                }
+            if (ioctl_param > temp_tail->channel_id) {
                 new_channel->channel_id = ioctl_param;
                 new_channel->message_size = 0;
                 temp_tail->next = new_channel;
@@ -251,20 +245,14 @@ static long device_ioctl( struct   file* file,
                 chosen_slot->slot_invoked_channel_id = ioctl_param;
                 return SUCCESS;
             }
-            while (temp_head != NULL && temp_head->channel_id < ioctl_param){
-                if (ioctl_param == (temp_head->channel_id)){
+            while (temp_head != NULL && temp_head->channel_id < ioctl_param) {
+                if (ioctl_param == (temp_head->channel_id)) {
                     // channel exists, update the slot this is
                     // the invoked channel
                     chosen_slot->slot_invoked_channel = temp_head;
                     chosen_slot->slot_invoked_channel_id = ioctl_param;
                     return SUCCESS;
-                }else{
-                    channel *new_channel;
-                    new_channel = kmalloc(sizeof(channel), GFP_KERNEL);
-                    if (new_channel == NULL){
-                        printk("device_ioctl kmalloc failed\n", file);
-                        return -ENOMEM;
-                    }
+                } else {
                     new_channel->channel_id = ioctl_param;
                     new_channel->message_size = 0;
                     new_channel->prev = temp_head->prev;
@@ -272,14 +260,16 @@ static long device_ioctl( struct   file* file,
                     temp_head->prev->next = new_channel;
                     temp_head->prev = new_channel;
                     chosen_slot->slot_invoked_channel = new_channel;
+                    return SUCCESS;
                 }
             }
         }
-    } else{
+    } else {
         return -EINVAL;
     }
-
+    return SUCCESS;
 }
+
 //==================== DEVICE SETUP =============================
 struct file_operations Fops = {
         .owner	  = THIS_MODULE,
@@ -294,6 +284,7 @@ static int __init message_slot_init(void)
 {
     // taken from CHARDEV2\chardev.c file from recitation 6
     int rc = -1;
+    int j;
     // init dev struct
     memset( &device_info, 0, sizeof(struct chardev_info) );
     spin_lock_init( &device_info.lock );
@@ -308,7 +299,7 @@ static int __init message_slot_init(void)
     }
 //  initiate an empty list for each possible message_slot
 //  with minor number 0<=i<=256
-    for (int j = 0; j < 257; ++j) {
+    for (j = 0; j < 257; ++j) {
         message_slots[j].head = NULL;
     }
     return SUCCESS;
@@ -318,8 +309,9 @@ static void __exit message_slot_cleanup(void)
 {
     // free all the allocated memory (list for each message_slot device)
     channel *temp_head;
-    channl *head;
-    for (int i = 0; i < 257; ++i) {
+    channel *head;
+    int i;
+    for (i = 0; i < 257; ++i) {
         head = message_slots[i].head;
         while(head != NULL){
             temp_head = head;
