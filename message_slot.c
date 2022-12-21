@@ -56,7 +56,6 @@ static int dev_open_flag = 0;
 
 static struct chardev_info device_info;
 
-// The message the device will give when asked
 
 
 
@@ -191,6 +190,7 @@ static long device_ioctl( struct   file* file,
         // if we add a new one, we need to add it sorted by the id_num
         message_slot *chosen_slot = (void*) file->private_data;
         channel *slot_lst_head = message_slots[chosen_slot->minor_number].head;
+        channel *slot_lst_tail = message_slots[chosen_slot->minor_number].tail;
         if (slot_lst_head == NULL){
         // list is empty, we don't need to search and we can add a
         // new channel at the start
@@ -215,7 +215,7 @@ static long device_ioctl( struct   file* file,
             // list is not empty, we need to find if the channel exists
             // if not, we need to add it to the list in the sorted place
             channel *temp_head = slot_lst_head;
-            channel *temp_tail = slot_lst_head;
+            channel *temp_tail = slot_lst_tail;
 
             if (ioctl_param < temp_head->channel_id){
                 channel *new_channel;
@@ -230,7 +230,7 @@ static long device_ioctl( struct   file* file,
                 new_channel->next = temp_head;
                 new_channel->prev = NULL;
                 slot_lst_head = new_channel;
-                chosen_slot->slot_invoked_channel = slot_lst_head;
+                chosen_slot->slot_invoked_channel = new_channel;
                 chosen_slot->slot_invoked_channel_id = ioctl_param;
                 message_slots[chosen_slot->minor_number].head = slot_lst_head;
                 return SUCCESS;
@@ -244,24 +244,21 @@ static long device_ioctl( struct   file* file,
                 }
                 new_channel->channel_id = ioctl_param;
                 new_channel->message_size = 0;
-                temp_head->prev = new_channel;
+                temp_tail->next = new_channel;
                 new_channel->next = NULL;
                 new_channel->prev = temp_tail;
-                slot_lst_head = new_channel;
-                chosen_slot->slot_invoked_channel = slot_lst_head;
+                chosen_slot->slot_invoked_channel = new_channel;
                 chosen_slot->slot_invoked_channel_id = ioctl_param;
                 return SUCCESS;
             }
-            while (temp_head != NULL){
+            while (temp_head != NULL && temp_head->channel_id < ioctl_param){
                 if (ioctl_param == (temp_head->channel_id)){
                     // channel exists, update the slot this is
                     // the invoked channel
                     chosen_slot->slot_invoked_channel = temp_head;
                     chosen_slot->slot_invoked_channel_id = ioctl_param;
                     return SUCCESS;
-                }
-                if ((temp_head->prev->channel_id) < ioctl_param < (temp_head->channel_id)){
-                    channel *temp_prev = temp_head->prev;
+                }else{
                     channel *new_channel;
                     new_channel = kmalloc(sizeof(channel), GFP_KERNEL);
                     if (new_channel == NULL){
@@ -270,12 +267,11 @@ static long device_ioctl( struct   file* file,
                     }
                     new_channel->channel_id = ioctl_param;
                     new_channel->message_size = 0;
-                    new_channel->prev = temp_prev;
+                    new_channel->prev = temp_head->prev;
                     new_channel->next = temp_head;
                     temp_head->prev->next = new_channel;
                     temp_head->prev = new_channel;
                     chosen_slot->slot_invoked_channel = new_channel;
-                    return SUCCESS;
                 }
             }
         }
@@ -323,7 +319,7 @@ static void __exit message_slot_cleanup(void)
     // free all the allocated memory (list for each message_slot device)
     channel *temp_head;
     channl *head;
-    for (int j = 0; j < 257; ++j) {
+    for (int i = 0; i < 257; ++i) {
         head = message_slots[i].head;
         while(head != NULL){
             temp_head = head;
