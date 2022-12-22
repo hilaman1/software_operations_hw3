@@ -1,3 +1,4 @@
+// based on "userdev.c" file from recitation 6
 #include "message_slot.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,7 +13,8 @@
 
 int main(int argc, char** argv) {
     char* message_slot_file_path;
-    unsigned int target_message_channel_id;
+    int target_message_channel_id;
+    int message_size;
     char* message_to_pass;
     int ifp; /* input_file pointer */
     int returned_val;
@@ -35,8 +37,8 @@ int main(int argc, char** argv) {
         perror("ioctl failed");
         exit(1);
     }
-    int message_size = strlen(message_to_pass);
-    returned_val = write(ifp, message_to_pass, target_message_channel_id);
+    message_size = strlen(message_to_pass);
+    returned_val = write(ifp, message_to_pass, message_size);
     if (returned_val != message_size){
         perror("write failed");
         exit(1);

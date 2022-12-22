@@ -39,8 +39,8 @@ int main(int argc, char** argv) {
     close(ifp);
     // to print a message using write() system call,
     // we can write the message to the standard output file descriptor, which is '1'.
-    ssize_t bytes_written = write(1, the_message, BUF_LEN);
-    if (bytes_written < 0){
+    returned_val = write(1, the_message, BUF_LEN);
+    if (returned_val < 0){
         perror("Error writing to standard output");
         exit(1);
     }
