@@ -7,6 +7,7 @@
 #include <sys/ioctl.h>  /* ioctl */
 
 int main(int argc, char** argv) {
+    char the_message[BUF_LEN];
     char* message_slot_file_path;
     unsigned int target_message_channel_id;
     int ifp; /* file descriptor of message_slot */
@@ -29,9 +30,8 @@ int main(int argc, char** argv) {
         perror("ioctl() failed");
         exit(1);
     }
-    char the_message[BUF_LEN];
     // using the syscall read()
-    returned_val = read(ifp, the_message, BUF_LEN);
+    returned_val = read(ifp, &the_message, BUF_LEN);
     if (returned_val < 0){
         perror("read() failed");
         exit(1);

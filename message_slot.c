@@ -15,6 +15,7 @@
 
 MODULE_LICENSE("GPL");
 
+
 typedef struct channel{
     unsigned int channel_id;
     char current_message[BUF_LEN];
@@ -79,52 +80,99 @@ static int device_open( struct inode* inode,
 //---------------------------------------------------------------
 // a process which has already opened
 // the device file attempts to read from it
+//static ssize_t device_read( struct file* file,
+//                            char __user* buffer,
+//                            size_t       length,
+//                            loff_t*      offset )
+//{
+//
+//    int i;
+//    message_slot *current_slot = (message_slot*)(file->private_data);
+//    int minor = current_slot->minor_number;
+//    channel *temp_head = message_slots[minor].head;
+//    int channel_id;
+//    char the_message[BUF_LEN];
+//    int i,j;
+//    printk( "Invocing device_read(%p,%ld)\n",file, length);
+//    channel_id = current_slot->slot_invoked_channel_id;
+//    if (channel_id == 0){
+//        return -EINVAL;
+//    }
+//    while (temp_head != NULL && temp_head->channel_id != channel_id) {
+//        temp_head = temp_head->next;
+//    }
+//    if (temp_head == NULL){
+//        return -EINVAL;
+//    }
+//    if (current_slot->slot_invoked_channel_id != 0 && buffer != NULL){
+//        if (last_message_size != 0){
+//            if (length >= last_message_size){
+//                for(i = 0; i < last_message_size; ++i){
+//                    // get_user returns -EFAULT on error:
+//                    // https://www.cs.bham.ac.uk/~exr/lectures/opsys/12_13/docs/kernelAPI/r3776.html
+//                    if(put_user(the_message[i], &buffer[i]) != 0){
+//                        return -EFAULT;
+//                    }
+//                    // we use put_user to check if this address is legal
+//                }
+//                // Returns the number of bytes read
+//                return i;
+//            }else{
+//                return -ENOSPC;
+//            }
+//        }else{
+//            return -EWOULDBLOCK;
+//        }
+//    }else{
+//        return -EINVAL;
+//    }
+//}
 static ssize_t device_read( struct file* file,
                             char __user* buffer,
                             size_t       length,
                             loff_t*      offset )
 {
-
-    int i;
-    message_slot *current_slot = (message_slot*)(file->private_data);
+    message_slot *current_slot = (message_slot*) (file->private_data);
     int minor = current_slot->minor_number;
     channel *temp_head = message_slots[minor].head;
+    char *current_message;
     int channel_id;
-    char the_message[BUF_LEN];
-    int i,j;
-    printk( "Invocing device_read(%p,%ld)\n",file, length);
+    int i;
+    printk("Invoking device_read(%p,%ld)\n", file, length);
     channel_id = current_slot->slot_invoked_channel_id;
-    if (channel_id == 0){
+    if (channel_id == 0 || buffer == NULL){
+        printk("line 142");
         return -EINVAL;
     }
     while (temp_head != NULL && temp_head->channel_id != channel_id) {
         temp_head = temp_head->next;
+        printk("line 147");
     }
     if (temp_head == NULL){
+        printk("line 149");
         return -EINVAL;
     }
-    if (current_slot->slot_invoked_channel_id != 0 && buffer != NULL){
-        if (last_message_size != 0){
-            if (length >= last_message_size){
-                for(i = 0; i < last_message_size; ++i){
-                    // get_user returns -EFAULT on error:
-                    // https://www.cs.bham.ac.uk/~exr/lectures/opsys/12_13/docs/kernelAPI/r3776.html
-                    if(put_user(the_message[i], &buffer[i]) != 0){
-                        return -EFAULT;
-                    }
-                    // we use put_user to check if this address is legal
-                }
-                // Returns the number of bytes read
-                return i;
-            }else{
-                return -ENOSPC;
-            }
-        }else{
-            return -EWOULDBLOCK;
+    if (temp_head->message_size == 0){
+        printk("line 153");
+        return -EWOULDBLOCK;
+    }
+    if (length < temp_head->message_size){
+        printk("line 157");
+        return -ENOSPC;
+    }
+    current_message = temp_head->current_message;
+    for(i = 0; i < length; ++i ) {
+        // we use get_user to check if this address is legal
+        if (put_user(current_message[i], buffer + i) != 0){
+        // get_user returns -EFAULT on error:
+        // https://www.cs.bham.ac.uk/~exr/lectures/opsys/12_13/docs/kernelAPI/r3776.html
+            return -EFAULT;
         }
-    }else{
-        return -EINVAL;
     }
+    printk("finish reading");
+
+// return the number of input characters used
+    return temp_head->message_size;
 }
 
 //static ssize_t device_read(struct file* file, char __user* buffer, size_t length, loff_t* offset)
@@ -158,33 +206,33 @@ static ssize_t device_write(struct file* file, const char __user* buffer, size_t
     message_slot *current_slot = (message_slot*) (file->private_data);
     int minor = current_slot->minor_number;
     channel *temp_head = message_slots[minor].head;
+    char given_message[BUF_LEN];
     int channel_id;
-    char the_message[BUF_LEN];
-    int i,j;
+    int i;
     printk("Invoking device_write(%p,%ld)\n", file, length);
     channel_id = current_slot->slot_invoked_channel_id;
-    if (channel_id == 0){
+    if (channel_id == 0 || buffer == NULL){
         return -EINVAL;
     }
     while (temp_head != NULL && temp_head->channel_id != channel_id) {
         temp_head = temp_head->next;
     }
-    if (temp_head == NULL){
+    if (temp_head == NULL || temp_head->channel_id != channel_id){
         return -EINVAL;
     }
     if (length != 0 && length <= BUF_LEN){
-        for(i = 0; i < length && i < BUF_LEN; ++i ) {
+        for(i = 0; i < length; ++i ) {
         // we use get_user to check if this address is legal
-            if (get_user(the_message[i], &buffer[i]) != 0){
+            if (get_user(given_message[i], &buffer[i]) != 0){
             // get_user returns -EFAULT on error:
             // https://www.cs.bham.ac.uk/~exr/lectures/opsys/12_13/docs/kernelAPI/r3776.html
                 return -EFAULT;
             }
         }
-        for(j = 0; j < length && j < BUF_LEN; ++j ) {
-            temp_head->current_message[j] = the_message[j];
-        }
         temp_head->message_size = length;
+        for(i = 0; i < length; ++i){
+            temp_head->current_message[i] = given_message[i];
+        }
         // return the number of input characters used
         return length;
     }else{
