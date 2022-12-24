@@ -14,7 +14,7 @@
 int main(int argc, char** argv) {
     char* message_slot_file_path;
     int target_message_channel_id;
-    int message_size;
+    size_t message_size;
     char* message_to_pass;
     int ifp; /* input_file pointer */
     int returned_val;

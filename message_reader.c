@@ -31,7 +31,7 @@ int main(int argc, char** argv) {
         exit(1);
     }
     // using the syscall read()
-    returned_val = read(ifp, &the_message, BUF_LEN);
+    returned_val = read(ifp, the_message, BUF_LEN);
     if (returned_val < 0){
         perror("read() failed");
         exit(1);
@@ -39,7 +39,7 @@ int main(int argc, char** argv) {
     close(ifp);
     // to print a message using write() system call,
     // we can write the message to the standard output file descriptor, which is '1'.
-    returned_val = write(1, the_message, BUF_LEN);
+    returned_val = write(1, &the_message, returned_val);
     if (returned_val < 0){
         perror("Error writing to standard output");
         exit(1);
