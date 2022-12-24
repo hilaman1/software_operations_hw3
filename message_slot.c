@@ -88,23 +88,18 @@ static ssize_t device_read( struct file* file,
     printk("Invoking device_read(%p,%ld)\n", file, length);
     channel_id = (unsigned int) current_slot->slot_invoked_channel_id;
     if (channel_id == 0 || buffer == NULL){
-        printk("line 142");
         return -EINVAL;
     }
     while (temp_head != NULL && temp_head->channel_id != channel_id) {
         temp_head = temp_head->next;
-        printk("line 147");
     }
     if (temp_head == NULL){
-        printk("line 149");
         return -EINVAL;
     }
     if (temp_head->message_size == 0){
-        printk("line 153");
         return -EWOULDBLOCK;
     }
     if (length < temp_head->message_size){
-        printk("line 157");
         return -ENOSPC;
     }
     current_message = temp_head->current_message;
